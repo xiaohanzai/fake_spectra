@@ -149,21 +149,14 @@ std::valarray< std::map<int, double> > IndexTable::get_near_particles(const floa
     return line_near_parts;
 }
 
-double * IndexTable::assign_cells(const int line_i, const std::valarray< std::map<int, double> > nearby_array, const float pos[])
+float * IndexTable::assign_cells(const int line_i, const std::valarray< std::map<int, double> > nearby_array, const float pos[])
 {
-    /***********************************/
-    printf("assigning parts of line %d to cells...\n", line_i);
-    int Ncells = 0;
-    for(std::map<int, double>::const_iterator it = nearby_array[line_i].begin(); it != nearby_array[line_i].end(); ++it) Ncells++;
-    printf("Ncells=%d\n", Ncells);
-    double * arr2 = new double [2*Ncells];
+    const int Ncells = nearby_array[line_i].size();
+    printf("assigning parts of line %d to %d cells...\n", line_i, Ncells);
+    float * arr2 = new float [2*Ncells];
     // initialize
-    for(int i = 0; i < Ncells; ++i)
-    {
-        arr2[2*i] = -100;
-        arr2[2*i+1] = -100;
-    }
-    //printf("arr2[0]=%f, arr2[1]=%f\n", arr2[0], arr2[1]);
+    for(int i = 0; i < 2*Ncells; ++i)
+        arr2[i] = -100;
 
     // divide each sightline into an array. grid size = RESO ckpc/h
     int N = int(boxsize/RESO);
@@ -197,7 +190,6 @@ double * IndexTable::assign_cells(const int line_i, const std::valarray< std::ma
             ind++;
         }
         // assign to arr2
-        //printf("i=%d min_ind=%d, before: left=%f, right=%f\n", i, min_ind, arr2[2*min_ind], arr2[2*min_ind+1]);
         if(arr2[2*min_ind] < 0)
         {
             arr2[2*min_ind] = xp;
@@ -222,7 +214,6 @@ double * IndexTable::assign_cells(const int line_i, const std::valarray< std::ma
                 }
             }
         }
-        //printf("i=%d min_ind=%d, after: left=%f, right=%f\n", i, min_ind, arr2[2*min_ind], arr2[2*min_ind+1]);
     }
 
     for(int i = 0; i < Ncells; ++i){
@@ -231,5 +222,4 @@ double * IndexTable::assign_cells(const int line_i, const std::valarray< std::ma
     }
 
     return arr2;
-    /***********************************/
 }

@@ -6,6 +6,9 @@
 #include "Faddeeva.h"
 
 #define NGRID 8
+#define TOP_HAT_KERNEL 0
+#define SPH_CUBIC_SPLINE 1
+
 
 /* The (unnormalized) cubic kernel from Price 2011: arxiv 1012.1885 , eq. 6
  * We define the support over h < 1, rather than h < 2 used there.
@@ -56,17 +59,10 @@ class SingleAbsorber
          * aa: voigt_fac/btherm the parameter for the Voigt profile
          * Check extra carefully whether m_vhigh is real.
          */
-        SingleAbsorber(double bth_i, double vdr2_i, double vsm_i, double aa_i, int arepo_):
-            btherm(bth_i), vdr2(vdr2_i), vsmooth(vsm_i), aa(aa_i),
-            m_vhigh((vsmooth*vsmooth > vdr2 ? sqrt(vsmooth*vsmooth-vdr2) : 0)),
-            arepo(arepo_)
-            {
-                if(arepo)
-                {
-                    if(vdr2 > 0 && vsmooth > 0) m_vhigh = (vsmooth - vdr2)/2.;
-                    else m_vhigh = 0;
-                }
-            };
+        SingleAbsorber(double bth_i, double vdr2_i, double vsm_i, double aa_i, int kernel_i):
+            btherm(bth_i), vdr2(vdr2_i), vsmooth(vsm_i), aa(aa_i), kernel(kernel_i),
+            m_vhigh((vsmooth*vsmooth > vdr2 ? sqrt(vsmooth*vsmooth-vdr2) : 0))
+        {};
 
         /*Find the mean optical depth in the bin, by averaging over the optical depth
          * at different points within it. The relevant scale here is the thermal broadening, b,
@@ -133,8 +129,12 @@ class SingleAbsorber
                 //The difference between this velocity bin and the particle velocity
                 const double vdiff = vv - vouter;
                 const double T0 = vdiff/btherm;
-                if(arepo) total += profile(T0,aa);
-                else total+=sph_kernel(q)*profile(T0,aa);
+                double tbin = profile(T0, aa);
+                if(kernel == SPH_CUBIC_SPLINE)
+                    tbin*=sph_kernel(q);
+                else if(kernel == TOP_HAT_KERNEL)
+                    tbin *= 3./4./M_PI;
+                total+=tbin;
             }
             return deltav*total;
         }
@@ -143,8 +143,8 @@ class SingleAbsorber
         const double vdr2;
         const double vsmooth;
         const double aa;
-        double m_vhigh;
-        const int arepo;
+        const int kernel;
+        const double m_vhigh;
 };
 
 double sph_cubic_kern_frac(double zlow, double zhigh, double smooth, double dr2, double zrange);

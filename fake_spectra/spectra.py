@@ -38,10 +38,9 @@ from .cloudy_tables import convert_cloudy
 def _get_cloudy_table(red, cdir=None):
     """Get the cloudy table if we didn't already"""
     #Generate cloudy tables
-    if cdir != None:
-        return convert_cloudy.CloudyTable(red, cdir)
-    else:
+    if cdir is None:
         return convert_cloudy.CloudyTable(red)
+    return convert_cloudy.CloudyTable(red, cdir)
 
 #python2 compat
 try:
@@ -70,15 +69,20 @@ class Spectra(object):
             sf_neutral - bug fix for certain Gadget versions. See gas_properties.py
             quiet - Whether to output debug messages
             load_snapshot - Whether to load the snapshot
+            gasprop - Name (not instance!) of class to compute neutral fractions and temperatures.
+                      It should inherit from gas_properties.GasProperties and provide get_reproc_HI
+                      for neutral fractions and get_temp for temperatures.
+                      Default is gas_properties.GasProperties which reads both of these from the particle output.
+            gasprop_args - Dictionary of extra arguments to be fed to gasprop, if gasprop is not the default.
             TDR_file - if not empty, this file contains a temperature density relation to interpolate from. also provides initial guesses for Ne.
     """
-    def __init__(self,num, base,cofm, axis, res=1., cdir=None, savefile="spectra.hdf5", savedir=None, reload_file=False, snr = 0., spec_res = 0,load_halo=False, units=None, sf_neutral=True,quiet=False, load_snapshot=True, TDR_file="", include_shockheated=True):
+    def __init__(self,num, base,cofm, axis, res=1., cdir=None, savefile="spectra.hdf5", savedir=None, reload_file=False, snr = 0., spec_res = 0,load_halo=False, units=None, sf_neutral=True,quiet=False, load_snapshot=True, gasprop=None, gasprop_args=None, TDR_file="", include_shockheated=True):
         #Present for compatibility. Functionality moved to HaloAssignedSpectra
         _= load_halo
         self.num = num
         self.base = base
         #Create the unit system
-        if units != None:
+        if units is not None:
             self.units = units
         else:
             self.units = unitsystem.UnitSystem()
@@ -111,6 +115,8 @@ class Spectra(object):
         try:
             if load_snapshot:
                 self.snapshot_set = absn.AbstractSnapshotFactory(num, base, TDR_file, include_shockheated)
+                #Set up the kernel
+                self.kernel_int = self.snapshot_set.get_kernel()
         except IOError:
             pass
         if savedir is None:
@@ -183,8 +189,13 @@ class Spectra(object):
         #Line data
         self.lines = line_data.LineData()
         #Load the class for computing gas properties such as temperature from the raw simulation.
+        if gasprop is None:
+            gasprop = gas_properties.GasProperties
         try:
-            self.gasprop=gas_properties.GasProperties(redshift = self.red, absnap=self.snapshot_set, hubble=self.hubble, units=self.units, sf_neutral=sf_neutral)
+            gprop_args = {"redshift" : self.red, "absnap" : self.snapshot_set, "hubble": self.hubble, "units": self.units, "sf_neutral": sf_neutral}
+            if gasprop_args is not None:
+                gprop_args.update(gasprop_args)
+            self.gasprop = gasprop(**gprop_args)
         except AttributeError:
             #Occurs if we didn't load a snapshot
             pass
@@ -492,6 +503,18 @@ class Spectra(object):
         #Do interpolation.
         return (pos, vel, elem_den, temp, hh, amumass)
 
+    def find_all_particles(self):
+        """Returns the positions, velocities and smoothing lengths of all particles near sightlines."""
+        nsegments = self.snapshot_set.get_n_segments()
+        pp = np.empty([0,3])
+        hhh = np.array([])
+        for i in range(nsegments):
+            (pos, _, _, _, hh, amumass) = self._read_particle_data(i, "H", -1, False)
+            if amumass is not False:
+                pp = np.concatenate([pp, pos])
+                hhh = np.concatenate([hhh, hh])
+        return pp, hhh
+
     def _filter_particles(self, elem_den, pos, velocity, den):
         """Get a filtered list of particles to add to the sightlines"""
         _ = (pos,velocity, den)
@@ -530,7 +553,7 @@ class Spectra(object):
     def _do_interpolation_work(self,pos, vel, elem_den, temp, hh, amumass, line, get_tau):
         """Run the interpolation on some pre-determined arrays, spat out by _read_particle_data"""
         #Factor of 10^-8 converts line width (lambda_X) from Angstrom to cm
-        return _Particle_Interpolate(get_tau*1, self.nbins, self.snapshot_set.get_kernel(), self.box, self.velfac, self.atime, line.lambda_X*1e-8, line.gamma_X, line.fosc_X, amumass, self.tautail, pos, vel, elem_den, temp, hh, self.axis, self.cofm)
+        return _Particle_Interpolate(get_tau*1, self.nbins, self.kernel_int, self.box, self.velfac, self.atime, line.lambda_X*1e-8, line.gamma_X, line.fosc_X, amumass, self.tautail, pos, vel, elem_den, temp, hh, self.axis, self.cofm)
 
     def particles_near_lines(self, pos, hh,axis=None, cofm=None):
         """Filter a particle list, returning an index list of those near sightlines"""
@@ -681,6 +704,7 @@ class Spectra(object):
             return result
         for nn in xrange(1,nsegments):
             tresult =  self._interpolate_single_file(nn, elem, ion, ll, get_tau)
+            print("Interpolation %.1f percent done" % (100*nn/nsegments))
             #Add new file
             result += tresult
             del tresult
@@ -709,9 +733,10 @@ class Spectra(object):
         """
         print("For ",line," Angstrom")
         eq_width = self.equivalent_width(elem, ion, line)
-        v_table = np.arange(np.log10(np.min(eq_width)), np.log10(np.max(eq_width)), dv)
-        vbin = np.array([(v_table[i]+v_table[i+1])/2. for i in range(0,np.size(v_table)-1)])
-        eqws = np.histogram(np.log10(eq_width),v_table, density=True)[0]
+        ii = np.where(eq_width > 0)
+        v_table = np.arange(np.log10(np.min(eq_width[ii])), np.log10(np.max(eq_width[ii])), dv)
+        vbin = (v_table[1:]+v_table[:-1])/2.
+        eqws = np.histogram(np.log10(eq_width[ii]),v_table, density=True)[0]
         return (vbin, eqws)
 
     def get_col_density(self, elem, ion, force_recompute=False):
@@ -762,14 +787,13 @@ class Spectra(object):
         (pos, vel, elem_den, temp, hh, amumass) = self._read_particle_data(fn, elem, ion,True)
         if amumass is False:
             return np.zeros([np.shape(self.cofm)[0],self.nbins,3],dtype=np.float32)
-        else:
-            line = self.lines[("H",1)][1215]
-            vv =  np.empty([np.shape(self.cofm)[0],self.nbins,3],dtype=np.float32)
-            phys = self.dvbin/self.velfac*self.rscale
-            for ax in (0,1,2):
-                weight = vel[:,ax]*np.sqrt(self.atime)
-                vv[:,:,ax] = self._do_interpolation_work(pos, vel, elem_den*weight/phys, temp, hh, amumass, line, False)
-            return vv
+        line = self.lines[("H",1)][1215]
+        vv =  np.empty([np.shape(self.cofm)[0],self.nbins,3],dtype=np.float32)
+        phys = self.dvbin/self.velfac*self.rscale
+        for ax in (0,1,2):
+            weight = vel[:,ax]*np.sqrt(self.atime)
+            vv[:,:,ax] = self._do_interpolation_work(pos, vel, elem_den*weight/phys, temp, hh, amumass, line, False)
+        return vv
 
     def _get_mass_weight_quantity(self, func, elem, ion):
         """
@@ -812,11 +836,10 @@ class Spectra(object):
         (pos, vel, elem_den, temp, hh, amumass) = self._read_particle_data(fn, elem, ion,True)
         if amumass is False:
             return np.zeros([np.shape(self.cofm)[0],self.nbins],dtype=np.float32)
-        else:
-            line = self.lines[("H",1)][1215]
-            phys = np.float32(self.dvbin/self.velfac*self.rscale)
-            temp = self._do_interpolation_work(pos, vel, elem_den*temp/phys, temp, hh, amumass, line, False)
-            return temp
+        line = self.lines[("H",1)][1215]
+        phys = np.float32(self.dvbin/self.velfac*self.rscale)
+        temp = self._do_interpolation_work(pos, vel, elem_den*temp/phys, temp, hh, amumass, line, False)
+        return temp
 
     def get_temp(self, elem, ion):
         """Get the density weighted temperature in each pixel for a given species.
@@ -834,12 +857,11 @@ class Spectra(object):
         (pos, vel, elem_den, temp, hh, amumass) = self._read_particle_data(fn, elem, ion,True)
         if amumass is False:
             return np.zeros([np.shape(self.cofm)[0],self.nbins],dtype=np.float32)
-        else:
-            (_, _, species_den, _, _, _) = self._read_particle_data(fn, elem, -1,True)
-            line = self.lines[("H",1)][1215]
-            phys = np.float32(self.dvbin/self.velfac*self.rscale)
-            dens = self._do_interpolation_work(pos, vel, (elem_den/phys)*(species_den/self.rscale), temp, hh, amumass, line, False)
-            return dens
+        (_, _, species_den, _, _, _) = self._read_particle_data(fn, elem, -1,True)
+        line = self.lines[("H",1)][1215]
+        phys = np.float32(self.dvbin/self.velfac*self.rscale)
+        dens = self._do_interpolation_work(pos, vel, (elem_den/phys)*(species_den/self.rscale), temp, hh, amumass, line, False)
+        return dens
 
     def get_dens_weighted_density(self, elem, ion):
         """This function gets the (ion) density weighted (species) density in each pixel for a given species.
@@ -947,7 +969,7 @@ class Spectra(object):
         """
         #Column density of ion in atoms cm^-2 (physical)
         col_den = np.sum(self.get_col_density(elem, ion), axis=1)
-        if thresh > 0 or upthresh != None:
+        if thresh > 0 or upthresh is not None:
             HIden = np.sum(col_den[np.where((col_den > thresh)*(col_den < upthresh))])/np.size(col_den)
         else:
             HIden = np.mean(col_den)
@@ -1044,7 +1066,7 @@ class Spectra(object):
         tau = self.get_tau(elem, ion, line)
         return fstat.flux_pdf(tau, nbins=nbins, mean_flux_desired = mean_flux_desired)
 
-    def get_flux_power_1D(self, elem="H",ion=1, line=1215, mean_flux_=None, mean_flux_desired = None, scale=1., window=True):
+    def get_flux_power_1D(self, elem="H",ion=1, line=1215, mean_flux_desired = None, window=True):
         """Get the power spectrum of (variations in) the flux along the line of sight.
         This is: P_F(k_F) = <d_F d_F>
                  d_F = e^-tau / mean(e^-tau) - 1
@@ -1054,5 +1076,5 @@ class Spectra(object):
         #Mean flux rescaling does not commute with the spectrum resolution correction!
         if mean_flux_desired is not None and self.spec_res > 0:
             raise ValueError("Cannot sensibly rescale mean flux with gaussian smoothing")
-        (kf, avg_flux_power) = fstat.flux_power(tau, self.vmax, spec_res=self.spec_res, mean_flux_=mean_flux_, mean_flux_desired=mean_flux_desired, scale=scale, window=window)
+        (kf, avg_flux_power) = fstat.flux_power(tau, self.vmax, spec_res=self.spec_res, mean_flux_desired=mean_flux_desired, window=window)
         return kf[1:],avg_flux_power[1:]

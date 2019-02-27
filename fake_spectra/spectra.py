@@ -74,9 +74,8 @@ class Spectra(object):
                       for neutral fractions and get_temp for temperatures.
                       Default is gas_properties.GasProperties which reads both of these from the particle output.
             gasprop_args - Dictionary of extra arguments to be fed to gasprop, if gasprop is not the default.
-            TDR_file - if not empty, this file contains a temperature density relation to interpolate from. also provides initial guesses for Ne.
     """
-    def __init__(self,num, base,cofm, axis, res=1., cdir=None, savefile="spectra.hdf5", savedir=None, reload_file=False, snr = 0., spec_res = 0,load_halo=False, units=None, sf_neutral=True,quiet=False, load_snapshot=True, gasprop=None, gasprop_args=None, TDR_file="", include_shockheated=True):
+    def __init__(self,num, base,cofm, axis, res=1., cdir=None, savefile="spectra.hdf5", savedir=None, reload_file=False, snr = 0., spec_res = 0,load_halo=False, units=None, sf_neutral=True,quiet=False, load_snapshot=True, gasprop=None, gasprop_args=None):
         #Present for compatibility. Functionality moved to HaloAssignedSpectra
         _= load_halo
         self.num = num
@@ -114,7 +113,7 @@ class Spectra(object):
         self.tautail = 1e-7
         try:
             if load_snapshot:
-                self.snapshot_set = absn.AbstractSnapshotFactory(num, base, TDR_file, include_shockheated)
+                self.snapshot_set = absn.AbstractSnapshotFactory(num, base)
                 #Set up the kernel
                 self.kernel_int = self.snapshot_set.get_kernel()
         except IOError:
@@ -434,10 +433,6 @@ class Spectra(object):
         """Read the particle data for a single interpolation"""
         pos = self.snapshot_set.get_data(0,"Position",segment = fn).astype(np.float32)
         hh = self.snapshot_set.get_smooth_length(0,segment=fn).astype(np.float32)
-
-        # arepo
-        # if self.kernel_int == 2:
-        #     hh *= 1.5
 
         #Find particles we care about
         if self.cofm_final:

@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
 """A rate network for neutral hydrogen following
 Katz, Weinberg & Hernquist 1996, eq. 28-32."""
-import numpy as np
 import os.path
+import math
+import numpy as np
 import scipy.interpolate as interp
 import scipy.optimize
 
@@ -34,8 +35,9 @@ class RateNetwork(object):
         selfshield - Flag to enable self-shielding following Rahmati 2013
         cool - which cooling rate coefficient table to use.
                Supported are: KWH (original Gadget rates)
-                              Nyx (rates used in Nyx (Lukic 2015) and Sherwood (Bolton 2017))
-              Default is Nyx, used in Sherwood and Nyx simulations.
+                              Nyx (rates used in Nyx (Lukic 2015))
+                              Sherwood (rates used in Sherwood simulations (Bolton 2017))
+              Default is Sherwood
         recomb - which recombination rate table to use.
                  Supported are: C92 (Cen 1992, the Gadget default)
                                 V96 (Verner & Ferland 1996, more accurate rates).
@@ -43,7 +45,7 @@ class RateNetwork(object):
         collisional - Flag to enable collisional ionizations.
         treecool_file - File to read a UV background from. Matches format used by Gadget.
     """
-    def __init__(self,redshift, photo_factor = 1., f_bar = 0.17, converge = 1e-7, selfshield=True, cool="Nyx", recomb="B06", collisional=True, treecool_file="data/TREECOOL_ep_2018p"):
+    def __init__(self,redshift, photo_factor = 1., f_bar = 0.17, converge = 1e-7, selfshield=True, cool="Sherwood", recomb="V96", collisional=True, treecool_file="data/TREECOOL_ep_2018p"):
         if recomb == "V96":
             self.recomb = RecombRatesVerner96()
         elif recomb == "B06":
@@ -55,17 +57,25 @@ class RateNetwork(object):
         self.f_bar = f_bar
         if cool == "KWH":
             self.cool = CoolingRatesKWH92()
+        elif cool == "Sherwood":
+            self.cool = CoolingRatesSherwood()
         elif cool == "Nyx":
             self.cool = CoolingRatesNyx()
         else:
             raise ValueError("Not supported")
+        #Extra helium reionization photoheating model
+        self.hub = 0.7
+        self.he_thresh = 10
+        self.he_amp = 1
+        self.he_exp = 0
+        self.he_model_on = False
         #proton mass in g
         self.protonmass = 1.67262178e-24
         self.redshift = redshift
         self.converge = converge
         self.selfshield = selfshield
         self.collisional = collisional
-        zz = [0, 1, 2, 3, 4, 5, 6, 7,8]
+        zz = [0, 1, 2, 3, 4, 5, 6, 7, 8]
         #Tables for the self-shielding correction. Note these are not well-measured for z > 5!
         gray_opac = [2.59e-18,2.37e-18,2.27e-18, 2.15e-18, 2.02e-18, 1.94e-18, 1.82e-18, 1.71e-18, 1.60e-18]
         self.Gray_ss = interp.InterpolatedUnivariateSpline(zz, gray_opac)
@@ -79,14 +89,13 @@ class RateNetwork(object):
         nh = density * (1-helium)
         return self._get_temp(ne/nh, ienergy, helium)
 
-    def get_cooling_rate(self, density, ienergy, helium=0.24):
-        """Get the total cooling rate for a temperature and density."""
+    def get_cooling_rate(self, density, ienergy, helium=0.24, photoheating=False):
+        """Get the total cooling rate for a temperature and density. Negative means heating."""
         ne = self.get_equilib_ne(density, ienergy, helium)
         nh = density * (1-helium)
         temp = self._get_temp(ne/nh, ienergy, helium)
         nH0 = self._nH0(nh, temp, ne)
         nHe0 = self._nHe0(nh, temp, ne)
-        nHep = self._nHep(nh, temp, ne)
         nHp = self._nHp(nh, temp, ne)
         nHep = self._nHep(nh, temp, ne)
         nHepp = self._nHepp(nh, temp, ne)
@@ -99,7 +108,16 @@ class RateNetwork(object):
                              self.cool.RecombHePP(temp) * nHepp)
         LambdaFF = ne * (self.cool.FreeFree(temp, 1)*(nHp + nHep) + self.cool.FreeFree(temp, 2)*nHepp)
         LambdaCmptn = ne * self.cool.InverseCompton(temp, self.redshift)
-        return LambdaCollis + LambdaRecomb + LambdaFF + LambdaCmptn
+        Lambda = LambdaCollis + LambdaRecomb + LambdaFF + LambdaCmptn
+        Heating = 0
+        if photoheating:
+            Heating = nH0 * self.photo.epsH0(self.redshift)
+            Heating += nHe0 * self.photo.epsHe0(self.redshift)
+            Heating += nHep * self.photo.epsHep(self.redshift)
+            Heating *= self.photo_factor
+            if self.he_model_on:
+                Heating *= self._he_reion_factor(density)
+        return Lambda - Heating
 
     def get_equilib_ne(self, density, ienergy,helium=0.24):
         """Solve the system of equations for photo-ionisation equilibrium,
@@ -190,6 +208,21 @@ class RateNetwork(object):
         T4 = temp/1e4
         G12 = self.photo.gH0(redshift)/1e-12
         return 6.73e-3 * (self.Gray_ss(redshift) / 2.49e-18)**(-2./3)*(T4)**0.17*(G12)**(2./3)*(self.f_bar/0.17)**(-1./3)
+
+    def _he_reion_factor(self, density):
+        """Compute a density dependent correction factor to the heating rate which can model the effect of helium reionization.
+        Argument: Gas density in protons/cm^3."""
+        #Newton's constant (cgs units)
+        gravity = 6.672e-8
+        #100 km/s/Mpc in h/sec
+        hubble = 3.2407789e-18
+        omegab = 0.0483
+        atime = 1/(1+self.redshift)
+        rhoc = 3 * (self.hub* hubble)**2 /(8* math.pi * gravity)
+        overden = self.protonmass * density /(omegab * rhoc * atime**(-3))
+        if overden >= self.he_thresh:
+            overden = self.he_thresh
+        return self.he_amp * overden**self.he_exp
 
     def _get_temp(self, nebynh, ienergy, helium=0.24):
         """Compute temperature (in K) from internal energy and electron density.
@@ -381,10 +414,14 @@ class PhotoRates(object):
             data = np.loadtxt(treefile)
         redshifts = data[:,0]
         photo_rates = data[:,1:4]
+        photo_heat = data[:,4:7]
         assert np.shape(redshifts)[0] == np.shape(photo_rates)[0]
         self.Gamma_HI = interp.InterpolatedUnivariateSpline(redshifts, photo_rates[:,0])
         self.Gamma_HeI = interp.InterpolatedUnivariateSpline(redshifts, photo_rates[:,1])
         self.Gamma_HeII = interp.InterpolatedUnivariateSpline(redshifts, photo_rates[:,2])
+        self.Eps_HI = interp.InterpolatedUnivariateSpline(redshifts, photo_heat[:,0])
+        self.Eps_HeI = interp.InterpolatedUnivariateSpline(redshifts, photo_heat[:,1])
+        self.Eps_HeII = interp.InterpolatedUnivariateSpline(redshifts, photo_heat[:,2])
 
     def gHe0(self,redshift):
         """Get photo rate for neutral Helium"""
@@ -401,6 +438,21 @@ class PhotoRates(object):
         log1z = np.log10(1+redshift)
         return self.Gamma_HI(log1z)
 
+    def epsHe0(self,redshift):
+        """Get photo heating rate for neutral Helium"""
+        log1z = np.log10(1+redshift)
+        return self.Eps_HeI(log1z)
+
+    def epsHep(self,redshift):
+        """Get photo heating rate for singly ionized Helium"""
+        log1z = np.log10(1+redshift)
+        return self.Eps_HeII(log1z)
+
+    def epsH0(self,redshift):
+        """Get photo heating rate for neutral Hydrogen"""
+        log1z = np.log10(1+redshift)
+        return self.Eps_HI(log1z)
+
 class CoolingRatesKWH92(object):
     """The cooling rates from KWH92, in erg s^-1 cm^-3 (cgs).
     All rates are divided by the abundance of the ions involved in the interaction.
@@ -415,20 +467,27 @@ class CoolingRatesKWH92(object):
         Free-free: Spitzer 1978.
     Collisional excitation and ionisation cooling rates are merged.
     """
-    def __init__(self, tcmb=2.7255, recomb=None):
+    def __init__(self, tcmb=2.7255, t5_corr=1e5, recomb=None):
         self.tcmb = tcmb
         if recomb is None:
             self.recomb = RecombRatesCen92()
         else:
             self.recomb = recomb
+        self.t5_corr = t5_corr
         #1 eV in ergs
         self.eVinergs = 1.60218e-12
         #boltzmann constant in erg/K
         self.kB = 1.38064852e-16
 
     def _t5(self, temp):
-        """Commonly used Cen 1992 correction factor for large temperatures."""
-        return 1+(temp/1e5)**0.5
+        """Commonly used Cen 1992 correction factor for large temperatures.
+        This is implemented so that the cooling rates have the right
+        asymptotic behaviour. However, Cen erroneously imposes this correction at T=1e5,
+        which is too small: the Black 1981 rates these are based on should be good
+        until 5e5 at least, where the correction factor has a 10% effect already.
+        More modern tables thus impose it at T=5e7, which is still arbitrary but should be harmless.
+        """
+        return 1+(temp/t5_corr)**0.5
 
     def CollisionalExciteH0(self, temp):
         """Collisional excitation cooling rate for n_H0 and n_e. Gadget calls this BetaH0."""
@@ -512,6 +571,14 @@ class CoolingRatesKWH92(object):
         cc = 2.99792e10
         return 4 * sigmat * rad_dens / (me*cc) * tcmb_red**4 * self.kB * (temp - tcmb_red)
 
+class CoolingRatesSherwood(CoolingRatesKWH92):
+    """The cooling rates used in the Sherwood simulation, Bolton et al 2017, in erg s^-1 cm^-3 (cgs).
+    Differences from KWH92 are updated recombination and collisional ionization rates, and the use of a
+    larger temperature correction factor than Cen 92.
+    """
+    def __init__(self, tcmb=2.7255, recomb=None):
+        CoolingRatesKWH92.__init__(tcmb = tcmb, t5_corr = 5e7, recomb=RecombRatesVerner96)
+
 class CoolingRatesNyx(CoolingRatesKWH92):
     """The cooling rates used in the Nyx paper Lukic 2014, 1406.6361, in erg s^-1 cm^-3 (cgs).
     All rates are divided by the abundance of the ions involved in the interaction.
@@ -528,15 +595,8 @@ class CoolingRatesNyx(CoolingRatesKWH92):
         Black 1981 (recombination and helium)
         Shapiro & Kang 1987
     """
-    def _t5(self, temp):
-        """
-        Lukic uses a less aggressive correction factor for large temperatures than Cen 1992.
-        No explanation is given for this in the paper, but he explained privately that this is probably
-        so that it matches Black 1981 for all the regime where that code is valid.
-        This factor increases the excitation cooling rate for helium by about a factor of ten and
-        thus changes the cooling curve substantially.
-        """
-        return 1+(temp/5e7)**0.5
+    def __init__(self, tcmb=2.7255, recomb=None):
+        CoolingRatesKWH92.__init__(tcmb = tcmb, t5_corr = 5e7, recomb=recomb)
 
     def CollisionalH0(self, temp):
         """Collisional cooling rate for n_H0 and n_e. Gadget calls this BetaH0 + GammaeH0.

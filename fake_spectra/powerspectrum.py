@@ -58,7 +58,6 @@ except NameError:
 class CalcPowerspectrum(spectra.Spectra):
     """Class to calculate power spectrum and associated things.
     I assume we already have a spectra file written."""
-
     def __init__(self, num, base, savefile, **kwargs):
         spectra.Spectra.__init__(
             self, num, base, cofm=None, axis=None, savefile=savefile, reload_file=False, **kwargs)

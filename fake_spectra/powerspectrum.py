@@ -68,7 +68,7 @@ class CalcPowerspectrum(spectra.Spectra):
             return 1.
 
         tau = self.get_tau(elem, ion, line)
-        return mean_flux(tau, mean_flux_desired)
+        return fstat.mean_flux(tau, mean_flux_desired)
 
     def get_flux_power_1D(self, elem="H",ion=1, line=1215, mean_flux_=None, mean_flux_desired = None, scale=1., window=True):
         """This is a rewrite of the function in spectra.Spectra"""

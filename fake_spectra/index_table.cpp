@@ -197,7 +197,7 @@ float * IndexTable::assign_cells(const int line_i, const std::valarray< std::map
         }
         else
         {
-            if(xp - arr2[2*min_ind+1] < 1.01*reso)
+            if(xp - arr2[2*min_ind+1] < 1.1*reso)
                 arr2[2*min_ind+1] = xp;
             else
             {
@@ -209,7 +209,7 @@ float * IndexTable::assign_cells(const int line_i, const std::valarray< std::map
                 }
                 else
                 {
-                    printf("i=%d, something wrong! left=%f, right=%f\n", i, arr2[2*min_ind], arr2[2*min_ind+1]);
+                    printf("i=%d, min_ind=%d, something wrong! left=%f, right=%f\n", i, min_ind, arr2[2*min_ind], arr2[2*min_ind+1]);
                     exit(1);
                 }
             }

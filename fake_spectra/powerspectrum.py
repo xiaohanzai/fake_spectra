@@ -8,7 +8,7 @@ import matplotlib.pyplot as plt
 from . import spectra
 from . import fluxstatistics as fstat
 
-def flux_power(tau, vmax, spec_res = 8, mean_flux_=None, mean_flux_desired=None, scale=1., window=True):
+def flux_power(tau, vmax, spec_res = 8, mean_flux_=None, mean_flux_desired=None, scale=1., window=True, rollingmean=False):
     """ I made changes to the original flux_power function in fluxstatistics.
         Get the power spectrum of (variations in) the flux along the line of sight.
         This is: P_F(k_F) = <d_F d_F>
@@ -34,9 +34,13 @@ def flux_power(tau, vmax, spec_res = 8, mean_flux_=None, mean_flux_desired=None,
     mean_flux_power = np.zeros(npix//2+1, dtype=tau.dtype)
     for i in range(10):
         end = min((i+1)*nspec//10, nspec)
-        dflux=np.exp(-scale*tau[i*nspec//10:end])/mean_flux_desired - 1.
-        if mean_flux_ is not None:
-            dflux=np.exp(-scale*tau[i*nspec//10:end])/mean_flux_ - 1.
+        f = np.exp(-scale*tau[i*nspec//10:end])
+        if not rollingmean:
+            dflux = f / mean_flux_desired - 1.
+            if mean_flux_ is not None:
+                dflux = f / mean_flux_ - 1.
+        else:
+            dflux = f / f.mean(axis=1).reshape(-1,1) - 1.
         # Calculate flux power for each spectrum in turn
         flux_power_perspectra = fstat._powerspectrum(dflux, axis=1)
         #Take the mean and convert units.
@@ -70,21 +74,21 @@ class CalcPowerspectrum(spectra.Spectra):
         tau = self.get_tau(elem, ion, line)
         return fstat.mean_flux(tau, mean_flux_desired)
 
-    def get_flux_power_1D(self, elem="H",ion=1, line=1215, mean_flux_=None, mean_flux_desired = None, scale=1., window=True):
+    def get_flux_power_1D(self, elem="H",ion=1, line=1215, mean_flux_=None, mean_flux_desired = None, scale=1., window=True, rollingmean=False):
         """This is a rewrite of the function in spectra.Spectra"""
         tau = self.get_tau(elem, ion, line)
         #Mean flux rescaling does not commute with the spectrum resolution correction!
         if mean_flux_desired is not None and self.spec_res > 0:
             raise ValueError("Cannot sensibly rescale mean flux with gaussian smoothing")
-        (kf, avg_flux_power) = flux_power(tau, self.vmax, spec_res=self.spec_res, mean_flux_=mean_flux_, mean_flux_desired=mean_flux_desired, scale=scale, window=window)
+        (kf, avg_flux_power) = flux_power(tau, self.vmax, spec_res=self.spec_res, mean_flux_=mean_flux_, mean_flux_desired=mean_flux_desired, scale=scale, window=window, rollingmean=rollingmean)
         return kf[1:],avg_flux_power[1:]
 
-    def calc_powerspectrum(self, elem="H", ion=1, line=1215, mean_flux_=None, mean_flux_desired=None, scale=1., window=True, kmin=0.001, kmax=0.3, N=1000):
+    def calc_powerspectrum(self, elem="H", ion=1, line=1215, mean_flux_=None, mean_flux_desired=None, scale=1., window=True, kmin=0.001, kmax=0.3, N=1000, rollingmean=False):
         """Calculate power spectrum and do an interpolation in the range [kmin, kmax], using N points. Return the interpolated values.
         Can choose to input mean_flux_desired or scaling of the UVB."""
         xinterp = np.linspace(np.log10(kmin), np.log10(kmax), N)
         rst = self.get_flux_power_1D(
-            elem, ion, line, mean_flux_, mean_flux_desired, scale, window)
+            elem, ion, line, mean_flux_, mean_flux_desired, scale, window, rollingmean=rollingmean)
         yinterp = np.interp(xinterp, np.log10(rst[0]), np.log10(
             rst[1]), left=np.nan, right=np.nan)
         return 10**xinterp, 10**yinterp
